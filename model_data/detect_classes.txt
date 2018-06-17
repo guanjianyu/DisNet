@@ -1,0 +1,11 @@
+person
+bus
+truck
+car
+bicycle
+motorbike
+cat
+dog
+horse
+sheep
+cow
