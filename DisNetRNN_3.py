@@ -17,7 +17,7 @@ from keras.layers import concatenate
 from keras.optimizers import Adam
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 
-from keras.layers import Input, LSTM, Dense, Reshape, Dropout,GRU
+from keras.layers import Input, LSTM, Dense, Reshape, Dropout, GRU
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.utils.linear_assignment_ import linear_assignment
 from sklearn.externals import joblib
@@ -25,6 +25,7 @@ from sklearn.externals import joblib
 from yolo3.model import yolo_eval
 from yolo3.utils import letterbox_image
 from PIL import Image, ImageFont, ImageDraw
+import matplotlib.pyplot as plt
 
 
 class DisNet_RNN(object):
@@ -43,6 +44,7 @@ class DisNet_RNN(object):
 
         self.yolo_model_path = 'model_data/yolo.h5'
         self.DisNet_weights_path = "DisNet_RNN_Model/DisNet_RNN_vg_ss_weights.h5"
+        self.DisNet_position_weight = "DisNet_RNN_Model/DisNet_RNN_position_weights_1.h5"
         self.anchors_path = 'model_data/yolo_anchors.txt'
         self.classes_path = 'model_data/coco_classes.txt'
         self.detect_classes_path = 'model_data/detect_classes.txt'
@@ -132,15 +134,20 @@ class DisNet_RNN(object):
         else:
             for i in range(len(predict_boxes)):
                 top, left, bottom, right = predict_boxes[i]
-                top_pre = (float(top) / self.img_height)
-                left_pre = (float(left) / self.img_width)
+                top_1 = (float(top) / self.img_height)
+                left_1 = (float(left) / self.img_width)
+                bottom_1 = float(bottom) / self.img_height
+                right_1 = float(right) / self.img_width
                 width = float(right - left) / self.img_width
                 height = float(bottom - top) / self.img_height
                 diagonal = np.sqrt(np.square(width) + np.square(height))
                 predict_class = predict_classes[i]
                 class_h, class_w, class_d = np.array(self.class_size_dict[predict_class], dtype=np.float32) * 100
-                current_data = [class_h, class_w, class_d, 1.0 / width, 1.0 / height, 1.0 / diagonal,top_pre, left_pre]
-                detection_cache.append(current_data)
+                current_data = [class_h, class_w, class_d, 1.0 / width, 1.0 / height, 1.0 / diagonal]
+                current_data_scaled = self.scaler.transform(np.array(current_data).reshape(1, 6))
+                current_data_full = np.concatenate(
+                    (current_data_scaled, np.array([top_1, left_1, bottom_1, right_1]).reshape(1, 4)), axis=1)
+                detection_cache.append(np.squeeze(current_data_full))
             return np.array(detection_cache)
 
     def box_convert(self, detection_output=np.array([])):
@@ -150,12 +157,12 @@ class DisNet_RNN(object):
             detection_box = []
             for output in detection_output:
                 if np.any(output):
-                    width = 1.0 / output[3]
-                    height = 1.0 / output[4]
+                    # width = 1.0 / output[3]
+                    # height = 1.0 / output[4]
                     x1 = output[6]
                     y1 = output[7]
-                    x2 = x1 + height
-                    y2 = y1 + width
+                    x2 = output[8]
+                    y2 = output[9]
                     detection_box.append([x1, y1, x2, y2])
                 else:
                     detection_box.append([0, 0, 0, 0])
@@ -163,10 +170,15 @@ class DisNet_RNN(object):
 
     ## convert rnn output to input format
     def Output_convert(self, rnn_out):
-        convert_output = np.zeros_like(rnn_out)
-        convert_output[:, :3] = 100.0 / rnn_out[:, :3]
-        convert_output[:, 3:] = rnn_out[:, 3:]
-        return convert_output
+        output_cache = []
+        for i in range(len(rnn_out)):
+            top, left, bottom, right = rnn_out[i]
+            width = float(right - left)
+            height = float(bottom - top)
+            diagonal = np.sqrt(np.square(width) + np.square(height))
+            output_data = [1.0 / width, 1.0 / height, 1.0 / diagonal, top, left, bottom, right]
+            output_cache.append(output_data)
+        return np.array(output_cache)
 
     def iou(self, bb_test, bb_gt):
         """
@@ -183,7 +195,7 @@ class DisNet_RNN(object):
                   + (bb_gt[2] - bb_gt[0]) * (bb_gt[3] - bb_gt[1]) - wh)
         return (o)
 
-    def associate_detections_to_trackers(self, detections, trackers, iou_threshold=0.01):
+    def associate_detections_to_trackers(self, detections, trackers, iou_threshold=0.1):
         """
         Assigns detections to tracked object (both represented as bounding boxes)
         Returns 3 lists of matches, unmatched_detections and unmatched_trackers
@@ -232,13 +244,22 @@ class DisNet_RNN(object):
                 return
             else:
                 # if Detection result exist, but no tracker. Then initialize new tracker the same number as detector
-                self.tracker_new = np.zeros((len(self.detection_new), 3, 8))
+                self.tracker_new = np.zeros((len(self.detection_new), 3, 10))
                 self.tracker_new[:, -1, :] = self.detection_new
-
-                self.tracker_detect_index = np.array(detection_index)
+                self.predict_as_detection = np.zeros(len(self.tracker_new))
+                self._tracker_color(len(self.detection_new))
 
                 ##############
                 self.tracker_class = np.array(predict_classes)
+                ##############
+                self.tracker_detect_index = np.array(detection_index)
+
+                ##############
+                self.tracker_detect_history_new = np.array(
+                    (self.detection_new[:, 6:8] + self.detection_new[:, 8:]).reshape(-1, 1, 2) / 2)
+
+                ##############
+                self.tracker_predict_history_new = np.zeros((len(self.detection_new), 1, 2))
 
         else:
 
@@ -248,6 +269,29 @@ class DisNet_RNN(object):
                 self.tracker_new = np.zeros_like(self.tracker_last)
                 self.tracker_new[:, :-1, :] = self.tracker_last[:, 1:, :]
 
+                #############
+                # self.tracker_detect_history =np.append(self.tracker_detect_history,np.zeros(len(self.tracker_last),1,4),axis=1)
+                self.tracker_detect_history_new = np.zeros(
+                    (len(self.tracker_last), self.tracker_detect_history.shape[1] + 1, 2))
+                self.tracker_detect_history_new[:, :-1, :] = self.tracker_detect_history
+
+                ##############
+                self.tracker_predict_history_new = np.zeros(
+                    (len(self.tracker_last), self.tracker_detect_history.shape[1] + 1, 2))
+
+                self.tracker_predict_history_new[:, :-1, :] = self.tracker_predict_history
+
+                if len(self.prediction_result):
+                    self.tracker_new[self.prediction_tracker_index, -1, :] = self.prediction_result
+                    self.predict_as_detection[self.prediction_tracker_index] += 1
+
+                    ################
+                    self.tracker_predict_history_new[self.prediction_tracker_index, -1, :] = (
+                                                                                                         self.next_prediction_boxes[
+                                                                                                         :,
+                                                                                                         :2] + self.next_prediction_boxes[
+                                                                                                               :,
+                                                                                                               2:]) / 2
             else:
 
                 # if both detection result and tracker_last exist, match tracker with detector and update tracker_new with detection result
@@ -265,37 +309,97 @@ class DisNet_RNN(object):
                 self.unmatched_trackers = unmatched_trackers
 
                 # update tracker with corresponding detection results
-                self.tracker_new = np.zeros((len(matches) + len(unmatched_trackers) + len(unmatched_detections), 3, 8))
+                self.tracker_new = np.zeros((len(matches) + len(unmatched_trackers) + len(unmatched_detections), 3, 10))
                 self.tracker_new[:len(self.tracker_last), :-1, :] = self.tracker_last[:, 1:, :]
                 self.tracker_new[matches[:, 1], -1, :] = self.detection_new[matches[:, 0]]
 
-                self.tracker_detect_index = np.zeros((len(matches) + len(unmatched_trackers) + len(unmatched_detections)))
+                self.tracker_class_new = np.zeros(
+                    len(matches) + len(unmatched_trackers) + len(unmatched_detections), np.int32)
+                self.tracker_class_new[:len(self.tracker_class)] = self.tracker_class
+                self.tracker_class_new[matches[:, 1]] = np.array(predict_classes)[matches[:, 0]]
+
+                self.tracker_detect_index = np.zeros(
+                    (len(matches) + len(unmatched_trackers) + len(unmatched_detections)))
                 self.tracker_detect_index[matches[:, 1]] = detection_index[matches[:, 0]]
+
+                # create a cache counter for counting that using prediction results as detection
+                self.cache_predict_as_detection = np.zeros(len(self.tracker_new))
+                self.cache_predict_as_detection[:len(self.predict_as_detection)] = self.predict_as_detection
+                self.predict_as_detection = self.cache_predict_as_detection
+                self.predict_as_detection[matches[:, 1]] = 0
+
+                #################
+                self.tracker_detect_history_new = np.zeros((len(matches) + len(unmatched_trackers) + len(
+                    unmatched_detections), self.tracker_detect_history.shape[1] + 1, 2))
+                self.tracker_detect_history_new[:len(self.tracker_last), :-1, :] = self.tracker_detect_history
+                self.tracker_detect_history_new[matches[:, 1], -1, :] = (self.detection_new[matches[:, 0], 6:8].reshape(
+                    -1, 2) + self.detection_new[matches[:, 0], 8:].reshape(-1, 2)) / 2
+
+                #################
+                self.tracker_predict_history_new = np.zeros((len(matches) + len(unmatched_trackers) + len(
+                    unmatched_detections), self.tracker_predict_history_new.shape[1] + 1, 2))
+                self.tracker_predict_history_new[:len(self.tracker_last), :-1, :] = self.tracker_predict_history
+
+                if len(self.prediction_result):
+                    self.tracker_predict_history_new[self.prediction_tracker_index, -1, :] = (self.next_prediction_boxes[:,:2]
+                                                                                              + self.next_prediction_boxes[:,2:]) / 2
 
                 # create new trackers for unmatched_detections result
                 if len(unmatched_detections) is not 0:
                     self.tracker_new[len(self.tracker_last):, -1, :] = self.detection_new[unmatched_detections]
-
-                    self.tracker_detect_index[(len(matches) + len(unmatched_trackers)):] = detection_index[unmatched_detections]
+                    self._tracker_color(len(unmatched_detections))
 
                     #########
-                    self.tracker_class_new = np.zeros(
-                        len(matches) + len(unmatched_trackers) + len(unmatched_detections), np.int32)
+
+                    self.tracker_detect_index[(len(matches) + len(unmatched_trackers)):] = detection_index[
+                        unmatched_detections]
+
                     self.tracker_class_new[:len(self.tracker_class)] = self.tracker_class
                     self.tracker_class_new[len(self.tracker_class):] = np.array(predict_classes)[
                         np.squeeze(unmatched_detections)]
-                    self.tracker_class = self.tracker_class_new
 
-        # delete trackers without detection for a long time
-        self.delete_tracker_indexs = np.squeeze(np.argwhere(np.count_nonzero(self.tracker_new[:,-1],axis=1)==0))
+                    ################
+                    self.tracker_detect_history_new[(len(matches) + len(unmatched_trackers)):, -1] = (self.detection_new[unmatched_detections,6:8].reshape(-1,2)
+                                                                                                      + self.detection_new[unmatched_detections,8:].reshape(-1, 2)) / 2
+
+                self.tracker_class = self.tracker_class_new
+
+                # use prediction result to update unmatched tracker result
+                if len(unmatched_trackers) is not 0:
+                    for unmatched_index in unmatched_trackers:
+                        if unmatched_index in self.prediction_tracker_index:
+                            if len(self.prediction_result) is not 0:
+                                prediction_result_index = (self.prediction_tracker_index == unmatched_index)
+                                self.tracker_new[unmatched_index, -1, :] = np.squeeze(
+                                    self.prediction_result[prediction_result_index])
+                                self.predict_as_detection[unmatched_index] += 1
+
+        # delete trackers without detection for a long time                   
+        self.counter_tracker_len = np.count_nonzero(np.count_nonzero(self.tracker_new, axis=2), axis=1)
+        self.long_time_with_out_detection = np.argwhere(self.counter_tracker_len == 0)
+        # self.long_time_with_out_detection =np.squeeze(np.argwhere(np.count_nonzero(self.tracker_new[:,-1],axis=1)==0))
+        self.long_time_pred_without_detection = np.argwhere(self.predict_as_detection >= 2)
+        self.delete_tracker_indexs = np.unique(
+            np.append(self.long_time_with_out_detection, self.long_time_pred_without_detection))
+
+        ######################
+        self.tracker_detect_history_new = np.delete(self.tracker_detect_history_new, self.delete_tracker_indexs, axis=0)
+        self.tracker_detect_history = self.tracker_detect_history_new
+
+        #######################
+        self.tracker_predict_history_new = np.delete(self.tracker_predict_history_new, self.delete_tracker_indexs, axis=0)
+        self.tracker_predict_history = self.tracker_predict_history_new
 
         # update trackers and helpful counter
         self.tracker_new = np.delete(self.tracker_new, self.delete_tracker_indexs, axis=0)
-
+        self.predict_as_detection = np.delete(self.predict_as_detection, self.delete_tracker_indexs, axis=0)
+        self.counter_tracker_len = np.delete(self.counter_tracker_len, self.delete_tracker_indexs, axis=0)
+        self.tracker_color = np.delete(self.tracker_color, self.delete_tracker_indexs, axis=0)
 
         ####################
         self.tracker_class = np.delete(self.tracker_class, self.delete_tracker_indexs)
-        self.tracker_detect_index = np.delete(self.tracker_detect_index,self.delete_tracker_indexs)
+        self.tracker_detect_index = np.delete(self.tracker_detect_index, self.delete_tracker_indexs)
+        self.prediction_tracker_index = np.argwhere(self.counter_tracker_len == 3).reshape(-1)
         self.tracker_last = self.tracker_new
 
     def load_yolov3_model(self):
@@ -311,6 +415,7 @@ class DisNet_RNN(object):
         return boxes, scores, classes
 
     def construct_RNN_Model(self, pretrained=True):
+        # Construct DisNet Model
         inputs_g = Input(shape=(3, 6))
         x_g = GRU(128, return_sequences=True, unroll=True)(inputs_g)
         x_g = GRU(128, return_sequences=True, unroll=True)(x_g)
@@ -319,13 +424,21 @@ class DisNet_RNN(object):
         # x_g = GRU(64,return_sequences=True,unroll=True)(x_g)
         logits_distance_g = Dense(1, activation="relu", name="distance")(x_g)
 
-        self.DisNet_Model = Model(inputs=inputs_g, outputs=logits_distance_g)
+        self.DisNet_Distance = Model(inputs=inputs_g, outputs=logits_distance_g)
+
+        input_1 = Input(shape=(3, 4))
+        x = GRU(128, return_sequences=True, unroll=True)(input_1)
+        logits = Dense(4, activation='relu')(x)
+        self.DisNet_position = Model(inputs=input_1, outputs=logits)
+
         # load DisNet pretrained weight
         if pretrained:
-            DisNet_weights_path = os.path.expanduser(self.DisNet_weights_path)
-            assert DisNet_weights_path.endswith(".h5")
-            if os.path.isfile(DisNet_weights_path):
-                self.DisNet_Model.load_weights(DisNet_weights_path)
+            DisNet_Distance_path = os.path.expanduser(self.DisNet_weights_path)
+            DisNet_position_path = os.path.expanduser(self.DisNet_position_weight)
+            assert DisNet_Distance_path.endswith(".h5")
+            if os.path.isfile(DisNet_Distance_path):
+                self.DisNet_Distance.load_weights(DisNet_Distance_path)
+                self.DisNet_position.load_weights(DisNet_position_path)
                 print("load pretrained DisNet Model")
 
     def zoom_in_image(self, image):
@@ -354,7 +467,7 @@ class DisNet_RNN(object):
         detect_thickness = (image.size[0] + image.size[1]) // 900
         track_thickness = (image.size[0] + image.size[1]) // 700
 
-        # Check camera is zoomed or not
+        # Check camera is zoomed or not 
         if not self.ZoomCamera:
             if self.zoom_in_factor != 1:
                 image = self.zoom_in_image(image)
@@ -380,11 +493,12 @@ class DisNet_RNN(object):
                 self.input_image_shape: [image.size[1], image.size[0]],
                 k.learning_phase(): 0
             })
-        detect_classes = []
+
         detect_index = []
+        detect_classes = []
         detect_classes_name = []
         detect_boxes = []
-        index_current = 0
+        index_current = 1
         self.detection_box_yolo = out_boxes
         for i, c in reversed(list(enumerate(out_classes))):
             if self.class_names[c] in self.detect_classes:
@@ -393,68 +507,58 @@ class DisNet_RNN(object):
 
                 # add detection result in Array
                 detect_classes.append(c)
-                detect_index.append(index_current)
                 detect_classes_name.append(this_class)
                 detect_boxes.append(this_box)
+                detect_index.append(index_current)
                 index_current += 1
 
-
-        ### update tracker
-        self.update_tracker(detect_boxes, detect_classes_name, detect_classes,np.array(detect_index))
-
-        ### run tracker to predict result in next frame and distance
-        if len(self.tracker_last):
-            self.DisNet_input_reshape = self.tracker_last[:,:,:6].reshape(-1,6)
-            self.DisNet_input_scaled = self.scaler.transform(self.DisNet_input_reshape)
-            self.DisNet_input = self.DisNet_input_scaled.reshape(-1,3,6)
-            self.distances= self.DisNet_Model.predict(x=self.DisNet_input)
-
         draw = ImageDraw.Draw(image)
-        label_title = '{0:^10}{1:^10}{2:^10}{3:^10}'.format('Class', 'Index', 'Distance','Position')
+        label_title = '{0:^10}{1:^10}{2:^10}{3:^10}'.format('Class', 'Index', 'Distance', 'Position')
         title_size_corner = draw.textsize(label_title, font_corner)
-        title_corner = np.array([image.size[0] - title_size_corner[0],0])
+        title_corner = np.array([image.size[0] - title_size_corner[0], 0])
 
         draw.rectangle(
             [tuple(title_corner), tuple(title_corner + title_size_corner)],
-            fill=(200,200,200))
+            fill=(200, 200, 200))
         draw.text(title_corner, label_title, fill=(0, 0, 0), font=font_corner)
 
         del draw
 
-        ### draw tracking result
-        for i in range(len(self.tracker_last)):
+        ### update tracker
+        self.update_tracker(detect_boxes, detect_classes_name, detect_classes, np.array(detect_index))
+
+        ### run tracker to predict result in next frame and distance
+        if len(self.prediction_tracker_index):
+            self.prediction_result_full = np.zeros((len(self.prediction_tracker_index), 10))
+            self.prediction_result = np.zeros((len(self.prediction_tracker_index), 10))
+            X_input = self.tracker_last[self.prediction_tracker_index].reshape(-1, 3, 10)
+            X_distance = X_input[:, :, :6]
+            X_position = X_input[:, :, 6:]
+            self.distances = self.DisNet_Distance.predict(x=X_distance)[:, -1]
+            self.prediction_from_tracker = self.DisNet_position.predict(x=X_position)[:, -1]
+
+            self.prediction_result_full[:, :3] = self.tracker_last[self.prediction_tracker_index, -1, :3]
+            self.prediction_result_full[:, 3:] = self.Output_convert(self.prediction_from_tracker)
+            self.prediction_result[:, :6] = self.scaler.transform(self.prediction_result_full[:, :6].reshape(-1, 6))
+            self.prediction_result[:, 6:] = self.prediction_result_full[:, 6:]
+            self.next_prediction_boxes = self.prediction_from_tracker
+
+        ### visualize detection result
+        for i, c in enumerate(detect_classes):
             draw = ImageDraw.Draw(image)
-            # generate tracking distance and box
-            this_detect_index = int(self.tracker_detect_index[i])
-            distance = np.squeeze(self.distances[i, -1]) * self.zoom_in_factor
+            this_class = self.class_names[c]
 
-            box = detect_boxes[this_detect_index]
+            ### draw detection result
+            label = '{}{}'.format(this_class, int(i + 1))
+            label_size = draw.textsize(label, font)
 
-            ### get tracker class
-            this_tracker_class = self.tracker_class[i]
-            this_tracker_class_name = self.class_names[this_tracker_class]
+            box = detect_boxes[i]
 
             top, left, bottom, right = box
             top = max(0, np.floor(top + 0.5).astype('int32'))
             left = max(0, np.floor(left + 0.5).astype('int32'))
             bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
             right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
-
-            height = bottom - top
-            height_class = self.class_size_dict[this_tracker_class_name][1]
-            pixel_meter = float(height_class) / height
-            position = float(self.img_width - (right + left)) / 2 * pixel_meter
-
-            ### Setting label
-            label_left = '{0:^10}{1:^10}{2:^10.2f}{3:^10.2f}'.format(this_tracker_class_name, this_detect_index, float(distance),position)
-            label_size_corner = draw.textsize(label_left, font_corner)
-
-            ### draw detection result
-            label = '{}{}'.format(this_tracker_class_name, this_detect_index)
-            label_size = draw.textsize(label, font)
-
-
-            corner = np.array([image.size[0] - title_size_corner[0], title_size_corner[1] * (i+1)])
 
             if top - label_size[1] >= 0:
                 text_origin = np.array([left, top - label_size[1]])
@@ -465,21 +569,106 @@ class DisNet_RNN(object):
             for t in range(detect_thickness):
                 draw.rectangle(
                     [left + t, top + t, right - t, bottom - t],
-                    outline=self.yolo_class_colors[this_tracker_class])
+                    outline=self.yolo_class_colors[c])
             draw.rectangle(
                 [tuple(text_origin), tuple(text_origin + label_size)],
-                fill=self.yolo_class_colors[this_tracker_class])
+                fill=self.yolo_class_colors[c])
             draw.text(text_origin, label, fill=(0, 0, 0), font=font)
+            del draw
+
+        ### draw tracking result
+        for i, c in enumerate(self.prediction_tracker_index):
+            draw = ImageDraw.Draw(image)
+            # generate tracking distance and box
+
+            distance = np.squeeze(self.distances[i, -1]) * self.zoom_in_factor
+            next_box = np.squeeze(self.next_prediction_boxes[i])
+            n_top, n_left, n_bottom, n_right = next_box
+
+            ### get tracker class
+            this_tracker_class = self.tracker_class[c]
+            this_tracker_class_name = self.class_names[this_tracker_class]
+            this_tracker_index = int(self.tracker_detect_index[i])
+
+            n_top = max(0, np.floor(n_top * self.img_height + 0.5).astype('int32'))
+            n_left = max(0, np.floor(n_left * self.img_width + 0.5).astype('int32'))
+            n_bottom = min(image.size[1], np.floor(n_bottom * self.img_height + 0.5).astype('int32'))
+            n_right = min(image.size[0], np.floor(n_right * self.img_width + 0.5).astype('int32'))
+
+            height = n_bottom - n_top
+            height_class = self.class_size_dict[this_tracker_class_name][1]
+            pixel_meter = float(height_class) / height
+            position = float(self.img_width - (n_right + n_left)) / 2 * pixel_meter
+
+            ### Setting label
+            label_left = '{0:^10}{1:^10}{2:^10.2f}{3:^10.2f}'.format(this_tracker_class_name, this_tracker_index,
+                                                                     float(distance), position)
+            label_size_corner = draw.textsize(label_left, font_corner)
+
+            corner = np.array([image.size[0] - title_size_corner[0], title_size_corner[1] * (i + 1)])
+
+            for t in range(track_thickness):
+                draw.rectangle(
+                    [n_left + t, n_top + t, n_right - t, n_bottom - t],
+                    outline=tuple(np.squeeze(self.tracker_color[c])))
 
             draw.rectangle(
-                [tuple(corner), tuple(corner + title_size_corner)],
-                fill=self.yolo_class_colors[this_tracker_class])
+                [tuple(corner), tuple(corner + label_size_corner)],
+                fill=tuple(np.squeeze(self.tracker_color[c]))
+            )
             draw.text(corner, label_left, fill=(0, 0, 0), font=font_corner)
             del draw
 
+        fig = plt.figure(figsize=(10, 10))
+        ax1 = fig.add_subplot(2, 1, 1)
+        ax2 = fig.add_subplot(2, 1, 2)
+
+        ax1.set_ylim([0, 100])
+        ax1.set_title("X Position Vs Time", fontsize=12)
+        ax1.set_xlabel("Time Frames", fontsize=12)
+        ax1.set_ylabel("X position(%)", fontsize=12)
+        ax1.grid(True, linestyle='-.')
+
+        ax2.set_ylim([0, 100])
+        ax2.set_title("Y Position Vs Time", fontsize=12)
+        ax2.set_xlabel("Time Frames", fontsize=12)
+        ax2.set_ylabel("Y position(%)", fontsize=12)
+        ax2.grid(True, linestyle='-.')
+
+        self.draw_track_plot(ax1, ax2)
+        ax1.legend(loc=2)
+        ax2.legend(loc=2)
+
+        fig.canvas.draw()
+        fig_img = np.fromstring(fig.canvas.tostring_rgb(), dtype='uint8', sep='')
+        fig_img = fig_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        # fig_img = cv2.cvtColor(fig_img, cv2.COLOR_RGB2BGR)
+
         end = time.time()
         print("FPS: {:.2f}".format(1.0 / (end - start)))
-        return image
+        return image, fig_img
+
+    def draw_track_plot(self, ax1, ax2):
+        if (len(self.prediction_tracker_index)):
+            for i, c in enumerate(self.prediction_tracker_index):
+                this_tracker_class = self.tracker_class[c]
+                this_tracker_class_name = self.class_names[this_tracker_class]
+                this_tracker_index = int(self.tracker_detect_index[i])
+                ax1.plot(self.tracker_detect_history[c, :, 0]*100, c=np.asarray(self.tracker_color[i], np.float32) / 255,
+                         label=this_tracker_class_name + "_" + str(this_tracker_index) + "_detection", linewidth=2,
+                         linestyle='-')
+
+                ax1.plot(self.tracker_predict_history[c, :, 0]*100, c=np.asarray(self.tracker_color[i], np.float32) / 255,
+                         label=this_tracker_class_name + "_" + str(this_tracker_index) + "_prediction", linewidth=2,
+                         linestyle='--')
+
+                ax2.plot(self.tracker_detect_history[c, :, 1]*100, c=np.asarray(self.tracker_color[i], np.float32) / 255,
+                         label=this_tracker_class_name + "_" + str(this_tracker_index) + "_detection", linewidth=2,
+                         linestyle='-')
+
+                ax2.plot(self.tracker_predict_history[c, :, 1]*100, c=np.asarray(self.tracker_color[i], np.float32) / 255,
+                         label=this_tracker_class_name + "_" + str(this_tracker_index) + "_prediction", linewidth=2,
+                         linestyle='--')
 
     def close_session(self):
         self.sess.close()
