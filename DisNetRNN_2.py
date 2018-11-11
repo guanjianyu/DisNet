@@ -1,24 +1,14 @@
 import os
 import cv2
-import keras
-import json
 import random
 import colorsys
 import numpy as np
-import tensorflow as tf
+
 import keras.backend as k
 from timeit import time
-from timeit import default_timer as timer
 
-from keras.layers import Dense, Activation
-from keras.layers import InputLayer, Input
 from keras.models import Sequential, Model, load_model
-from keras.layers import concatenate
-from keras.optimizers import Adam
-from keras.callbacks import EarlyStopping, ModelCheckpoint
-
 from keras.layers import Input, LSTM, Dense, Reshape, Dropout,GRU
-from keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.utils.linear_assignment_ import linear_assignment
 from sklearn.externals import joblib
 
@@ -343,6 +333,20 @@ class DisNet_RNN(object):
         return Image.fromarray(image_zoom)
 
     def detect_image(self, image):
+        image = np.asarray(image)
+        image_center = np.divide(image.shape[:2], 2)
+        resize_height = np.round(image.shape[0] * float(1.0 / self.zoom_in_factor))
+        resize_width = np.round(image.shape[1] * float(1.0 / self.zoom_in_factor))
+
+        width_begin = np.int(image_center[1] - resize_width / 2)
+        width_end = np.int(image_center[1] + resize_width / 2)
+        height_begin = np.int(image_center[0] - resize_height / 2)
+        height_end = np.int(image_center[0] + resize_height / 2)
+        image_crop = image[height_begin:height_end, width_begin:width_end]
+        image_zoom = cv2.resize(image_crop, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_AREA)
+        return Image.fromarray(image_zoom)
+
+    def detect_image(self, image):
         start = time.time()
         self.img_width = image.size[0]
         self.img_height = image.size[1]
@@ -398,26 +402,25 @@ class DisNet_RNN(object):
                 detect_boxes.append(this_box)
                 index_current += 1
 
-
         ### update tracker
-        self.update_tracker(detect_boxes, detect_classes_name, detect_classes,np.array(detect_index))
+        self.update_tracker(detect_boxes, detect_classes_name, detect_classes, np.array(detect_index))
 
         ### run tracker to predict result in next frame and distance
         if len(self.tracker_last):
-            self.DisNet_input_reshape = self.tracker_last[:,:,:6].reshape(-1,6)
+            self.DisNet_input_reshape = self.tracker_last[:, :, :6].reshape(-1, 6)
             self.DisNet_input_scaled = self.scaler.transform(self.DisNet_input_reshape)
-            self.DisNet_input = self.DisNet_input_scaled.reshape(-1,3,6)
-            self.distances= self.DisNet_Model.predict(x=self.DisNet_input)
+            self.DisNet_input = self.DisNet_input_scaled.reshape(-1, 3, 6)
+            self.distances = self.DisNet_Model.predict(x=self.DisNet_input)
 
         draw = ImageDraw.Draw(image)
-        label_title = '{0:^10}{1:^10}{2:^10}{3:^10}'.format('Class', 'Index', 'Distance','Position')
+        label_title = '{0:^10}{1:^10}{2:^10}{3:^10}'.format('Class', 'Index', 'Distance', 'Position')
         title_size_corner = draw.textsize(label_title, font_corner)
-        title_corner = np.array([image.size[0] - title_size_corner[0],0])
+        title_corner = np.array([image.size[0] - title_size_corner[0], 0])
 
         draw.rectangle(
             [tuple(title_corner), tuple(title_corner + title_size_corner)],
             fill=(200,200,200))
-        draw.text(title_corner, label_title, fill=(0, 0, 0), font=font_corner)
+        draw.text(title_corner, label_title, fill=(0,0,0), font=font_corner)
 
         del draw
 
@@ -446,15 +449,15 @@ class DisNet_RNN(object):
             position = float(self.img_width - (right + left)) / 2 * pixel_meter
 
             ### Setting label
-            label_left = '{0:^10}{1:^10}{2:^10.2f}{3:^10.2f}'.format(this_tracker_class_name, this_detect_index, float(distance),position)
+            label_left = '{0:^10}{1:^10}{2:^10.2f}{3:^10.2f}'.format(this_tracker_class_name, this_detect_index,
+                                                                     float(distance), position)
             label_size_corner = draw.textsize(label_left, font_corner)
 
             ### draw detection result
             label = '{}{}'.format(this_tracker_class_name, this_detect_index)
             label_size = draw.textsize(label, font)
 
-
-            corner = np.array([image.size[0] - title_size_corner[0], title_size_corner[1] * (i+1)])
+            corner = np.array([image.size[0] - title_size_corner[0], title_size_corner[1] * (i + 1)])
 
             if top - label_size[1] >= 0:
                 text_origin = np.array([left, top - label_size[1]])
@@ -479,6 +482,7 @@ class DisNet_RNN(object):
 
         end = time.time()
         print("FPS: {:.2f}".format(1.0 / (end - start)))
+
         return image
 
     def close_session(self):

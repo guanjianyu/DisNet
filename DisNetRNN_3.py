@@ -43,8 +43,8 @@ class DisNet_RNN(object):
         self.class_size_dict = self.set_class_size()
 
         self.yolo_model_path = 'model_data/yolo.h5'
-        self.DisNet_weights_path = "DisNet_RNN_Model/DisNet_RNN_vg_ss_weights.h5"
-        self.DisNet_position_weight = "DisNet_RNN_Model/DisNet_RNN_position_weights_1.h5"
+        self.DisNet_weights_path = "DisNet_RNN_Model/DisNet_RNN_vg_ss_weights.h5" #"DisNet_RNN_Model/best_distance_model_DisNet_rnn_today.h5"   if you train the new model change here
+        self.DisNet_position_weight = "DisNet_RNN_Model/DisNet_RNN_position_weights_1.h5" #"DisNet_RNN_Model/best_distance_model_DisNet_rnn.h5"
         self.anchors_path = 'model_data/yolo_anchors.txt'
         self.classes_path = 'model_data/coco_classes.txt'
         self.detect_classes_path = 'model_data/detect_classes.txt'
@@ -234,7 +234,6 @@ class DisNet_RNN(object):
 
     def update_tracker(self, predict_boxes, predict_class_names, predict_classes, detection_index):
         # Generate Tracker sequence for RNN input
-
         # Detection result of current frame
         self.detection_new = self.data_generator(predict_boxes, predict_class_names)
 
@@ -341,6 +340,7 @@ class DisNet_RNN(object):
                 self.tracker_predict_history_new[:len(self.tracker_last), :-1, :] = self.tracker_predict_history
 
                 if len(self.prediction_result):
+                    print(len(self.prediction_tracker_index))
                     self.tracker_predict_history_new[self.prediction_tracker_index, -1, :] = (self.next_prediction_boxes[:,:2]
                                                                                               + self.next_prediction_boxes[:,2:]) / 2
 
@@ -378,7 +378,7 @@ class DisNet_RNN(object):
         self.counter_tracker_len = np.count_nonzero(np.count_nonzero(self.tracker_new, axis=2), axis=1)
         self.long_time_with_out_detection = np.argwhere(self.counter_tracker_len == 0)
         # self.long_time_with_out_detection =np.squeeze(np.argwhere(np.count_nonzero(self.tracker_new[:,-1],axis=1)==0))
-        self.long_time_pred_without_detection = np.argwhere(self.predict_as_detection >= 2)
+        self.long_time_pred_without_detection = np.argwhere(self.predict_as_detection >= 3)
         self.delete_tracker_indexs = np.unique(
             np.append(self.long_time_with_out_detection, self.long_time_pred_without_detection))
 
@@ -463,7 +463,7 @@ class DisNet_RNN(object):
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
                                   size=np.floor(1.2e-2 * image.size[1] + 0.5).astype('int32'))
         font_corner = ImageFont.truetype(font='font/FiraMono-Medium.otf',
-                                         size=np.floor(2e-2 * image.size[1] + 0.5).astype('int32'))
+                                         size=np.floor(4e-2 * image.size[1] + 0.5).astype('int32'))
         detect_thickness = (image.size[0] + image.size[1]) // 900
         track_thickness = (image.size[0] + image.size[1]) // 700
 
@@ -542,6 +542,9 @@ class DisNet_RNN(object):
             self.prediction_result[:, :6] = self.scaler.transform(self.prediction_result_full[:, :6].reshape(-1, 6))
             self.prediction_result[:, 6:] = self.prediction_result_full[:, 6:]
             self.next_prediction_boxes = self.prediction_from_tracker
+
+        else:
+            self.prediction_result=np.array([])
 
         ### visualize detection result
         for i, c in enumerate(detect_classes):

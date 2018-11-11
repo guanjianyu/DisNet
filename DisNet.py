@@ -13,17 +13,18 @@ from PIL import Image, ImageFont, ImageDraw
 from yolo3.model import yolo_eval
 from yolo3.utils import letterbox_image
 
+
 class DisNet(object):
-    def __init__(self,bZoomCamera,scale=1):
+    def __init__(self, bZoomCamera, scale=1):
         self.model_path = 'model_data/yolo.h5'
         self.anchors_path = 'model_data/yolo_anchors.txt'
         self.classes_path = 'model_data/coco_classes.txt'
         self.detect_classes_path = 'model_data/detect_classes.txt'
-        self.distance_model_path = "model_3.keras"
+        self.distance_model_path = "DisNet_Model/model_3.keras"
         self.score = 0.3
         self.iou = 0.5
         self.zoom_in_factor = scale
-        self.ZoomCamera=bZoomCamera
+        self.ZoomCamera = bZoomCamera
         self.class_names = self._get_class()
         self.detect_classes = self._get_detect_class()
         self.anchors = self._get_anchors()
@@ -108,7 +109,9 @@ class DisNet(object):
             })
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
-                                  size=np.floor(1.5e-2 * image.size[1] + 0.5).astype('int32'))
+                                  size=np.floor(1.2e-2 * image.size[1] + 0.5).astype('int32'))
+        font_corner = ImageFont.truetype(font='font/FiraMono-Medium.otf',
+                                  size=np.floor(4e-2 * image.size[1] + 0.5).astype('int32'))
         thickness = (image.size[0] + image.size[1]) // 900
 
         for i, c in reversed(list(enumerate(out_classes))):
@@ -119,20 +122,28 @@ class DisNet(object):
                 distance_input = self.load_dist_input(box, predicted_class, image.width, image.height)
                 distance = self.distance_model.predict(np.array([distance_input]).reshape(-1, 6)) * self.zoom_in_factor
 
-                label = '{} {:.2f} \n Distance {:.2f}'.format(predicted_class, float(np.squeeze(score)), float(np.squeeze(distance)))
+                label_left = '{} {} \nDistance {:.2f}M'.format(predicted_class, int(i+1), float(np.squeeze(distance)))
+                label = '{}{}'.format(predicted_class, int(i+1))
                 draw = ImageDraw.Draw(image)
                 label_size = draw.textsize(label, font)
+                label_size_corner=draw.textsize(label_left, font_corner)
 
                 top, left, bottom, right = box
+                #print(i,box)
+                #print(image.size)
                 top = max(0, np.floor(top + 0.5).astype('int32'))
                 left = max(0, np.floor(left + 0.5).astype('int32'))
                 bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
                 right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
 
+                #corner = np.array([image.size[0]-label_size_corner[0], 0 + label_size_corner[1]*i])
+		corner = np.array([0, 0 + label_size_corner[1]*i])
                 if top - label_size[1] >= 0:
                     text_origin = np.array([left, top - label_size[1]])
+
                 else:
                     text_origin = np.array([left, top + 1])
+
 
                 # My kingdom for a good redistributable image drawing library.
                 for i in range(thickness):
@@ -142,24 +153,29 @@ class DisNet(object):
                 draw.rectangle(
                     [tuple(text_origin), tuple(text_origin + label_size)],
                     fill=self.colors[c])
+                draw.rectangle(
+                    [tuple(corner),tuple(corner+label_size_corner)],
+                    fill=self.colors[c+1]
+                )
                 draw.text(text_origin, label, fill=(0, 0, 0), font=font)
+                draw.text(corner, label_left, fill=(0, 0, 0), font=font_corner)
                 del draw
 
         end = time.time()
-        print("FPS: {:.2f}".format(1.0/(end - start)))
+        print("FPS: {:.2f}".format(1.0 / (end - start)))
         return image
 
-    def zoom_in_image(self,image):
+    def zoom_in_image(self, image):
         image = np.asarray(image)
         image_center = np.divide(image.shape[:2], 2)
-        resize_height = np.round(image.shape[0] * float(1.0/self.zoom_in_factor))
-        resize_width = np.round(image.shape[1] * float(1.0/self.zoom_in_factor))
+        resize_height = np.round(image.shape[0] * float(1.0 / self.zoom_in_factor))
+        resize_width = np.round(image.shape[1] * float(1.0 / self.zoom_in_factor))
 
         width_begin = np.int(image_center[1] - resize_width / 2)
         width_end = np.int(image_center[1] + resize_width / 2)
         height_begin = np.int(image_center[0] - resize_height / 2)
         height_end = np.int(image_center[0] + resize_height / 2)
-        image_crop = image[height_begin:height_end,width_begin:width_end]
+        image_crop = image[height_begin:height_end, width_begin:width_end]
         image_zoom = cv2.resize(image_crop, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_AREA)
         return Image.fromarray(image_zoom)
 
@@ -172,9 +188,19 @@ class DisNet(object):
         dist_input = [1 / width, 1 / height, 1 / diagonal, class_h, class_w, class_d]
         return np.array(dist_input)
 
+    def load_dist_input_old(self, predict_box, predict_class, img_width, img_height):
+        top, left, bottom, right = predict_box
+        width = float(right - left) / img_width
+        height = float(bottom - top) / img_height
+        diagonal = np.sqrt(np.square(width) + np.square(height))
+        class_h, class_w, class_d = np.array(self.set_class_size[predict_class], dtype=np.float32)
+        dist_input = [ width,  height, diagonal, float(class_h)/100, float(class_w)/100, float(class_d)/100]
+        return np.array(dist_input)
+
+
     def set_class_size(self):
         classes = ['person', 'bus', 'truck', 'car', 'bicycle', 'motorbike', 'cat', 'dog', 'horse', 'sheep', 'cow']
-        class_shape = [[175, 55, 30], [300, 250, 1200], [300, 250, 1200], [160, 180, 400], [110, 50, 180],
+        class_shape = [[175, 55, 30], [300, 250, 1200], [400, 350, 1500], [160, 180, 400], [110, 50, 180],
                        [110, 50, 180], [40, 20, 50], [50, 30, 60], [180, 60, 200], [130, 60, 150], [170, 70, 200]]
         self.set_class_size = dict(zip(classes, class_shape))
         print("Load Class size!")
